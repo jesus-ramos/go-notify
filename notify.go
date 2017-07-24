@@ -7,18 +7,19 @@
 // and the name of the event are shared).
 //
 // Example:
+//     notifier := notify.NewNotifier()
 //     // producer of "my_event"
 //     go func() {
 //         for {
 //             time.Sleep(time.Duration(1) * time.Second):
-//             notify.Post("my_event", time.Now().Unix())
+//             notifier.Post("my_event", time.Now().Unix())
 //         }
 //     }()
 //
 //     // observer of "my_event" (normally some independent component that
 //     // needs to be notified when "my_event" occurs)
 //     myEventChan := make(chan interface{})
-//     notify.Start("my_event", myEventChan)
+//     notifier.Start("my_event", myEventChan)
 //     go func() {
 //         for {
 //             data := <-myEventChan
@@ -33,36 +34,44 @@ import (
 	"time"
 )
 
-const E_NOT_FOUND = "E_NOT_FOUND"
+var (
+	ErrEventNotFound = errors.New("Event not found")
+	ErrPostTimedOut  = errors.New("Post event timed out")
+)
 
 // returns the current version
 func Version() string {
-	return "0.2"
+	return "0.3"
 }
 
-// internal mapping of event names to observing channels
-var events = make(map[string][]chan interface{})
+type Notifier struct {
+	events map[string][]chan interface{}
+	sync.RWMutex
+}
 
-// mutex for touching the event map
-var rwMutex sync.RWMutex
+func NewNotifier() *Notifier {
+	return &Notifier{
+		events: make(map[string][]chan interface{}),
+	}
+}
 
 // Start observing the specified event via provided output channel
-func Start(event string, outputChan chan interface{}) {
-	rwMutex.Lock()
-	defer rwMutex.Unlock()
+func (notifier *Notifier) Start(event string, outputChan chan interface{}) {
+	notifier.Lock()
+	defer notifier.Unlock()
 
-	events[event] = append(events[event], outputChan)
+	notifier.events[event] = append(notifier.events[event], outputChan)
 }
 
 // Stop observing the specified event on the provided output channel
-func Stop(event string, outputChan chan interface{}) error {
-	rwMutex.Lock()
-	defer rwMutex.Unlock()
+func (notifier *Notifier) Stop(event string, outputChan chan interface{}) error {
+	notifier.Lock()
+	defer notifier.Unlock()
 
 	newArray := make([]chan interface{}, 0)
-	outChans, ok := events[event]
+	outChans, ok := notifier.events[event]
 	if !ok {
-		return errors.New(E_NOT_FOUND)
+		return ErrEventNotFound
 	}
 	for _, ch := range outChans {
 		if ch != outputChan {
@@ -71,36 +80,36 @@ func Stop(event string, outputChan chan interface{}) error {
 			close(ch)
 		}
 	}
-	events[event] = newArray
+	notifier.events[event] = newArray
 
 	return nil
 }
 
 // Stop observing the specified event on all channels
-func StopAll(event string) error {
-	rwMutex.Lock()
-	defer rwMutex.Unlock()
+func (notifier *Notifier) StopAll(event string) error {
+	notifier.Lock()
+	defer notifier.Unlock()
 
-	outChans, ok := events[event]
+	outChans, ok := notifier.events[event]
 	if !ok {
-		return errors.New(E_NOT_FOUND)
+		return ErrEventNotFound
 	}
 	for _, ch := range outChans {
 		close(ch)
 	}
-	delete(events, event)
+	delete(notifier.events, event)
 
 	return nil
 }
 
 // Post a notification (arbitrary data) to the specified event
-func Post(event string, data interface{}) error {
-	rwMutex.RLock()
-	defer rwMutex.RUnlock()
+func (notifier *Notifier) Post(event string, data interface{}) error {
+	notifier.RLock()
+	defer notifier.RUnlock()
 
-	outChans, ok := events[event]
+	outChans, ok := notifier.events[event]
 	if !ok {
-		return errors.New(E_NOT_FOUND)
+		return ErrEventNotFound
 	}
 	for _, outputChan := range outChans {
 		outputChan <- data
@@ -111,20 +120,23 @@ func Post(event string, data interface{}) error {
 
 // Post a notification to the specified event using the provided timeout for
 // any output channels that are blocking
-func PostTimeout(event string, data interface{}, timeout time.Duration) error {
-	rwMutex.RLock()
-	defer rwMutex.RUnlock()
+func (notifier *Notifier) PostTimeout(event string, data interface{}, timeout time.Duration) error {
+	notifier.RLock()
+	defer notifier.RUnlock()
 
-	outChans, ok := events[event]
+	var err error = nil
+
+	outChans, ok := notifier.events[event]
 	if !ok {
-		return errors.New(E_NOT_FOUND)
+		return ErrEventNotFound
 	}
 	for _, outputChan := range outChans {
 		select {
 		case outputChan <- data:
 		case <-time.After(timeout):
+			err = ErrPostTimedOut
 		}
 	}
 
-	return nil
+	return err
 }
