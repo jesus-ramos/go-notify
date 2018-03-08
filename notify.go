@@ -140,3 +140,27 @@ func (notifier *Notifier) PostTimeout(event string, data interface{}, timeout ti
 
 	return err
 }
+
+// Post a notification to the specified event using a function to generate the
+// data. State can be passed to the function for tracking purposes. Posting will
+// stop if an error is encountered so it's possible some channels may receive
+// the event and others will miss out
+func (notifier *Notifier) PostGenerateData(event string, state interface{}, generator func(s interface{}) (interface{}, error)) error {
+	notifier.RLock()
+	defer notifier.RUnlock()
+
+	outChans, ok := notifier.events[event]
+	if !ok {
+		return ErrEventNotFound
+	}
+	for _, outputChan := range outChans {
+		data, err := generator(state)
+		if err != nil {
+			return err
+		}
+
+		outputChan <- data
+	}
+
+	return nil
+}
